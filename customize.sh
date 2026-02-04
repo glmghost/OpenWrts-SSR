@@ -1,15 +1,18 @@
 #!/bin/bash
 #===============================================
-# Modify default IP
-#sed -i 's/192.168.1.1/192.168.31.238/g' openwrt/package/base-files/files/bin/config_generate
+# Minimal customize.sh for OpenWrt with Helloworld
+#===============================================
 
-# Modify default theme
-#sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
+# Add helloworld feed
+if [ -f "openwrt/feeds.conf.default" ] && ! grep -q "helloworld" "openwrt/feeds.conf.default"; then
+    echo "src-git helloworld https://github.com/fw876/helloworld.git" >> "openwrt/feeds.conf.default"
+    echo "Added helloworld feed to feeds.conf.default"
+fi
 
-# Modify hostname
-#sed -i 's/OpenWrt/kenzo/g' openwrt/package/base-files/files/bin/config_generate
+# Update and install feeds
+if [ -d "openwrt" ]; then
+    (cd openwrt && ./scripts/feeds update -a)
+    (cd openwrt && ./scripts/feeds install -a)
+fi
 
-#2. Custom settings
-#sed -i 's?zstd$?zstd ucl upx\n$(curdir)/upx/compile := $(curdir)/ucl/compile?g' tools/Makefile
-#sed -i 's/$(TARGET_DIR)) install/$(TARGET_DIR)) install --force-overwrite/' package/Makefile
-#sed -i 's/root:.*/root:$1$tTPCBw1t$ldzfp37h5lSpO9VXk4uUE\/:18336:0:99999:7:::/g' package/base-files/files/etc/shadow
+echo "Customization completed!"
