@@ -91,12 +91,10 @@ jobs:
           REPO_BRANCH="master"
         elif [[ "${{ github.event.inputs.version }}" == "23.05" ]]; then
           REPO_BRANCH="openwrt-23.05"
-        elif [[ "${{ github.event.inputs.version }}" == "23.05.0" ]]; then
-          REPO_TAG="v23.05.0"
-        elif [[ "${{ github.event.inputs.version }}" == "22.03" ]]; then
-          REPO_BRANCH="openwrt-22.03"
-        elif [[ "${{ github.event.inputs.version }}" == "22.03.5" ]]; then
-          REPO_TAG="v22.03.5"
+        elif [[ "${{ github.event.inputs.version }}" == "24.10" ]]; then
+          REPO_TAG="v24.10"
+        elif [[ "${{ github.event.inputs.version }}" == "25.12" ]]; then
+          REPO_BRANCH="openwrt-25.12"
         fi
         
         if [[ -n "$REPO_TAG" ]]; then
