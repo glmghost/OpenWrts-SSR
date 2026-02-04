@@ -1,17 +1,26 @@
 #=================================================
 # Description: Build OpenWrt using GitHub Actions
-# Lisence: MIT
-# Author: kenzo
+# License: MIT
+# Author: Your Name
 #=================================================
 
-name: SSR openwrt
+name: OpenWrt Official Build
 
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
+      version:
+        description: 'OpenWrt version to build'
+        required: true
+        default: 'master'
+        type: choice
+        options:
+        - '23.05'
+        - '24.10'
+        - '25.12'
+        - 'master'
       ssh:
-        description: 'ssh'
+        description: 'Enable SSH connection to Actions'
         required: false
         default: 'false'
 
@@ -26,23 +35,21 @@ env:
   REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
   REMOTE_PORT: ${{ secrets.REMOTE_PORT }}
   DOCKER_ID: ${{ secrets.DOCKER_ID }}
-  DOCKER_PASSWD: ${{ secrets.DOCKER_PASSWD }}  
+  DOCKER_PASSWD: ${{ secrets.DOCKER_PASSWD }}
   TZ: Asia/Shanghai
 
 jobs:
-  merge:
+  build:
     runs-on: ubuntu-latest
     if: github.event.repository.owner.id == github.event.sender.id
 
-    name: Build ${{matrix.target}}
+    name: Build OpenWrt ${{ github.event.inputs.version }}
     strategy:
       fail-fast: false
-      matrix:
-        target: [Lean]
     
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: Free disk space
       uses: coder-xiaomo/free-disk-space@main
@@ -53,7 +60,7 @@ jobs:
         haskell: true
         large-packages: true
         docker-images: true
-        swap-storage: true       
+        swap-storage: true
 
     - name: Initialization environment
       env:
@@ -68,232 +75,164 @@ jobs:
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "Asia/Shanghai"
-        
+
     - name: Get current date
       id: date
       run: |
         echo "date=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
         echo "date2=$(date +'%m/%d %Y')" >> $GITHUB_ENV
         echo "date3=$(date +'%m.%d')" >> $GITHUB_ENV
-        echo "DOCKERTAG=${{ secrets.DOCKER_ID }}/openwrt-6p:latest" >> $GITHUB_ENV
-        VERSION="$(echo "${{github.event.action}}" | grep -Eo " [0-9.]+" | sed -e 's/ //')" || true
-        [ "$VERSION" ] && echo "VERSION=$VERSION" >> $GITHUB_ENV || echo "VERSION=$(date +'%m.%d')" >> $GITHUB_ENV
-        
-    - name: Clone source code
-      env: 
-        REPO_URL: https://github.com/coolsnowwolf/lede
-        REPO_BRANCH: master
+        echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+
+    - name: Clone OpenWrt official source code
       run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        # Determine branch/tag based on version selection
+        if [[ "${{ github.event.inputs.version }}" == "master" ]]; then
+          REPO_BRANCH="master"
+        elif [[ "${{ github.event.inputs.version }}" == "23.05" ]]; then
+          REPO_BRANCH="openwrt-23.05"
+        elif [[ "${{ github.event.inputs.version }}" == "23.05.0" ]]; then
+          REPO_TAG="v23.05.0"
+        elif [[ "${{ github.event.inputs.version }}" == "22.03" ]]; then
+          REPO_BRANCH="openwrt-22.03"
+        elif [[ "${{ github.event.inputs.version }}" == "22.03.5" ]]; then
+          REPO_TAG="v22.03.5"
+        fi
+        
+        if [[ -n "$REPO_TAG" ]]; then
+          git clone --depth 1 https://github.com/openwrt/openwrt.git -b "$REPO_TAG" openwrt
+        else
+          git clone --depth 1 https://github.com/openwrt/openwrt.git -b "$REPO_BRANCH" openwrt
+        fi
+        
         cd openwrt
-        sed -i '$a src-git smpackage https://github.com/kenzok8/small-package' feeds.conf.default
+        
+        # Add helloworld plugin source
+        echo 'src-git helloworld https://github.com/fw876/helloworld.git' >> feeds.conf.default
+        
+        # Update feeds
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
     - name: Free up disk space
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo mkdir -p -m 777 /mnt/openwrt/dl /mnt/openwrt/bin /mnt/openwrt/staging_dir
+        sudo mkdir -p -m 777 /mnt/openwrt/dl /mnt/openwrt/staging_dir
         ln -sf /mnt/openwrt/dl openwrt/dl
-        ln -sf /mnt/openwrt/bin openwrt/bin
         ln -sf /mnt/openwrt/staging_dir openwrt/staging_dir
 
-    - name: Update feeds
-      working-directory: ./openwrt
-      run: |
-        ./scripts/feeds update -a
-
-    - name: Defconfig ${{matrix.target}}
-      env:
-        CONFIG_FILE: '${{matrix.target}}.config'
-      run: |
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x ./customize.sh && ./customize.sh
-        cd openwrt
-        rm -rf feeds/packages/lang/golang
-        git clone https://github.com/kenzok8/golang -b 1.25 feeds/packages/lang/golang
-        rm -rf feeds/luci/applications/luci-app-openclash
-        cp -f feeds/smpackage/.github/diy/default-settings package/lean/default-settings/files/zzz-default-settings
-        cp -f feeds/smpackage/.github/diy/banner package/base-files/files/etc/banner
-        #cp -f feeds/smpackage/.github/diy/index_x86.htm package/lean/autocore/files/x86/index.htm
-        sed -i "s/%D %V, %C/openwrt $(date +'%m.%d') by kenzo/g" package/base-files/files/etc/banner
-        sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
-        ./scripts/feeds update -a 
-        sed -i 's#GO_PKG_TARGET_VARS.*# #g' feeds/packages/utils/v2dat/Makefile 
-        ./scripts/feeds install -a
-        cp -f feeds/smpackage/.github/diy/${{matrix.target}}.config .config && make defconfig
-        #sed -i 's/CONFIG_BINUTILS_VERSION="2.42"/CONFIG_BINUTILS_VERSION="2.43.1"/' .config
-     
     - name: Load custom configuration
       run: |
-        # 明确：当前工作目录即为GitHub项目根目录（${{ github.workspace }}）
-        echo "当前工作目录（GitHub项目根目录）：$(pwd)"
-    
-        # 核心操作：处理GitHub项目根目录下的.config文件
+        echo "当前工作目录：$(pwd)"
+        
+        # 处理自定义配置
         if [ -e ./.config ]; then
-          echo "✅ 找到GitHub项目根目录下的.config文件，准备同步到openwrt编译目录"
-          # 强制复制项目根目录.config到openwrt目录（覆盖已有.config，确保配置唯一）
+          echo "✅ 找到项目根目录下的.config文件，准备同步到openwrt编译目录"
           cp -f ./.config ./openwrt/.config
           echo "✅ 已成功将项目根目录.config复制到 ./openwrt/.config"
         else
-          echo "⚠️  警告：GitHub项目根目录下未找到.config文件，将使用openwrt目录默认配置"
+          echo "⚠️  警告：项目根目录下未找到.config文件，将使用openwrt目录默认配置"
         fi
 
-        # 可选：同步项目根目录下的files目录（若有自定义文件需部署，保留即可）
         if [ -d ./files ]; then
-          echo "✅ 找到GitHub项目根目录下的files目录，准备移动到openwrt目录"
-          mv -f ./files ./openwrt/files
-          echo "✅ 已成功将项目根目录files目录移动到 ./openwrt/files"
+          echo "✅ 找到项目根目录下的files目录，准备移动到openwrt目录"
+          cp -rf ./files ./openwrt/files
+          echo "✅ 已成功将项目根目录files目录复制到 ./openwrt/files"
         fi
 
-        # 可选（推荐）：进入openwrt目录，验证并补全配置，确保编译无配置错误
+        # 进入openwrt目录，配置helloworld插件
         cd ./openwrt
+        
+        # 确保配置了helloworld源
+        if ! grep -q "helloworld" feeds.conf.default; then
+          echo 'src-git helloworld https://github.com/fw876/helloworld.git' >> feeds.conf.default
+        fi
+        
+        # 更新并安装feeds
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+        # 如果已有.config，则应用配置
         if [ -e ./.config ]; then
           echo "✅ 验证openwrt目录下的.config配置，自动补全缺失项"
           make defconfig
-          echo "✅ 配置验证完成，生成完整编译配置"
+          echo "✅ 配置验证完成"
         else
-          echo "⚠️  警告：openwrt目录下无有效.config文件，后续编译可能失败"
+          # 生成默认配置
+          make defconfig
+          echo "ℹ️  使用默认配置"
         fi
 
     - name: SSH connection to Actions
       uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      if: github.event.inputs.ssh == 'true'
       env:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        
-    - name: Clean up problematic packages before download
-      working-directory: ./openwrt
-      run: |
-        echo "Cleaning up problematic packages..."
-        # 清理可能有问题的包
-        rm -rf feeds/packages/utils/firmware-utils
-        rm -rf feeds/packages/libs/libnl-tiny
-        # 重新更新feeds
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
 
-    - name: Download package with retry and single thread
+    - name: Download package
       working-directory: ./openwrt
       run: |
-        # 首先尝试正常的下载
         echo "Starting package download..."
-        make download -j1 V=s || {
-          echo "Normal download failed, trying individual downloads..."
-          # 如果整体下载失败，则尝试单独下载有问题的包
-          echo "Attempting to download problematic packages individually..."
-          make tools/firmware-utils/compile V=s || echo "tools/firmware-utils download failed but continuing..."
-          make package/libs/libnl-tiny/compile V=s || echo "package/libs/libnl-tiny download failed but continuing..."
-          
-          # 再次尝试整体下载
-          make download -j1 V=s
-        }
+        make download -j$(nproc) V=s || make download -j1 V=s
         find dl -size -1024c -exec rm -f {} \;
         echo "Package download completed."
 
-    - name: Verify downloaded packages
-      working-directory: ./openwrt
-      run: |
-        echo "Checking downloaded packages integrity..."
-        if [ -d dl ]; then
-          echo "Downloaded packages:"
-          ls -la dl/ | head -20
-          echo "Checking for common missing packages..."
-          find dl/ -name "*firmware*" -type f
-          find dl/ -name "*libnl*" -type f
-        else
-          echo "No download directory found!"
-        fi
-        
     - name: Cache
-      uses: stupidloud/cachewrtbuild@main
+      uses: actions/cache@v3
       with:
-        ccache: 'true'
-        mixkey: ${{ matrix.target }}
-        clean: ${{ contains(github.event.action, 'nocache') }}
-        prefix: ${{ github.workspace }}/openwrt
-    
-    - name: Check space usage
-      run: |
-        shopt -s extglob
-        cd openwrt
-        if [[ -f staging_dir/*${{ env.MTARGET }}*/bin ]]; then
-            rm -rf staging_dir/!(*${{ env.MTARGET }}*|host|hostpkg) build_dir/!(*${{ env.MTARGET }}*|host|hostpkg)
-        fi
-        df -hT
+        path: |
+          openwrt/dl
+          openwrt/staging_dir
+          ~/.ccache
+        key: ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-
 
     - name: Compile the firmware
       working-directory: ./openwrt
       run: |
         echo -e "$(($(nproc)+1)) thread compile"
-        make -j$(($(nproc)+1)) || {
-          echo "Multi-threaded build failed, trying single-threaded..."
-          make -j1 V=s
-        }
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
+        make -j$(($(nproc)+1)) V=s || make -j1 V=s
 
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        mkdir firmware
-        mv -f openwrt/bin/targets/*/*/{*combined*,*sysupgrade*} ./firmware/ 2>/dev/null || true
-        cp openwrt/.config  ./firmware/${{matrix.target}}.config
-        cp openwrt/build_dir/target-*/linux-*/linux-*/.config ./firmware/${{matrix.target}}_kernel.config
-        cd firmware
-        echo "v${{ env.date2 }}" > version.txt
-        md5=$((md5sum *squashfs-sysupgrade* || md5sum *squashfs-combined-efi*) | awk '{print $1}') 2>/dev/null
-        echo $md5 >> version.txt
-        rename -v "s/^openwrt/${{ env.VERSION }}-openwrt/" * || true
-        rename -v "s/friendlyarm_//" *gz || true
-        echo $md5 >> version.txt
-        echo ${{matrix.target}} >> version.txt
-        rm -rf sha256sums
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        mkdir -p firmware
+        # 复制固件文件
+        find openwrt/bin/targets -type f \( -name "*combined*" -o -name "*sysupgrade*" -o -name "*rootfs*" -o -name "*kernel*" \) -exec cp {} firmware/ \;
         
+        # 复制配置文件
+        cp openwrt/.config firmware/openwrt.config
+        echo "Build date: $(date +'%Y-%m-%d %H:%M:%S')" > firmware/build-info.txt
+        echo "OpenWrt version: ${{ github.event.inputs.version }}" >> firmware/build-info.txt
+        echo "Repository: https://github.com/openwrt/openwrt" >> firmware/build-info.txt
+        echo "Helloworld plugin: https://github.com/fw876/helloworld" >> firmware/build-info.txt
+        
+        # 计算MD5
+        cd firmware
+        for file in *; do
+          if [ -f "$file" ] && [[ "$file" != *.md5 && "$file" != *.txt && "$file" != *.config ]]; then
+            md5sum "$file" > "$file.md5"
+          fi
+        done
+        
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+
     - name: Upload firmware directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_${{ github.event.inputs.version }}_${{ env.date }}
         path: ${{ env.FIRMWARE }}
-
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        # echo "::set-output name=url::$(cat cowtransfer.log | grep https | cut -f3 -d" ")"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        # echo "::set-output name=url::$(cat wetransfer.log | grep https | cut -f3 -d" ")"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
 
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        # echo "::set-output name=release_tag::$(date +"%Y.%m.%d-%H%M")"
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-        # echo "::set-output name=status::success"
+        echo "release_tag=${{ github.event.inputs.version }}-$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -303,7 +242,17 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
+        name: OpenWrt ${{ github.event.inputs.version }} Build
+        body: |
+          OpenWrt ${{ github.event.inputs.version }} Build
+          
+          Build date: $(date +'%Y-%m-%d %H:%M:%S')
+          
+          Source: https://github.com/openwrt/openwrt
+          
+          Helloworld plugin: https://github.com/fw876/helloworld
+          
+          This build includes only official OpenWrt sources and helloworld plugin.
         files: ${{ env.FIRMWARE }}/*
 
     - name: Delete workflow runs
