@@ -92,7 +92,7 @@ jobs:
         elif [[ "${{ github.event.inputs.version }}" == "23.05" ]]; then
           REPO_BRANCH="openwrt-23.05"
         elif [[ "${{ github.event.inputs.version }}" == "24.10" ]]; then
-          REPO_TAG="v24.10"
+          REPO_BRANCH="openwrt-24.10"
         elif [[ "${{ github.event.inputs.version }}" == "25.12" ]]; then
           REPO_BRANCH="openwrt-25.12"
         fi
