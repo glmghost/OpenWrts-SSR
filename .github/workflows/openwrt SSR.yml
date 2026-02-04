@@ -4,7 +4,7 @@
 # Author: Your Name
 #=================================================
 
-name: OpenWrt Official Build
+name: OpenWrt SSR
 
 on:
   workflow_dispatch:
