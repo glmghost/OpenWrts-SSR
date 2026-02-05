@@ -123,6 +123,9 @@ jobs:
     - name: Configure Rust for CI
       working-directory: ./openwrt
       run: |
+        # Create necessary directories if they don't exist
+        mkdir -p .cargo
+        
         # Create config override to fix Rust LLVM issue in CI
         echo "# Rust configuration override for CI" > .cargo/config.toml
         echo "[build]" >> .cargo/config.toml
