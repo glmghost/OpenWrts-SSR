@@ -120,6 +120,21 @@ jobs:
         ln -sf /mnt/openwrt/dl openwrt/dl
         ln -sf /mnt/openwrt/staging_dir openwrt/staging_dir
 
+    - name: Configure Rust for CI
+      working-directory: ./openwrt
+      run: |
+        # Create config override to fix Rust LLVM issue in CI
+        echo "# Rust configuration override for CI" > .cargo/config.toml
+        echo "[build]" >> .cargo/config.toml
+        echo "rustflags = [\"-C\", \"link-arg=-fuse-ld=lld\"]" >> .cargo/config.toml
+        
+        # Additionally, create local.mk to disable Rust compilation if needed
+        echo "# Local Makefile overrides" > local.mk
+        echo "# Disable Rust packages to avoid CI LLVM issue" >> local.mk
+        echo "# You can uncomment these lines if Rust is causing issues:" >> local.mk
+        echo "# CONFIG_PACKAGE_rust=y" >> local.mk
+        echo "# CONFIG_RUST_DOWNLOAD_CI_LLVM=if-unchanged" >> local.mk
+
     - name: Load custom configuration
       run: |
         echo "当前工作目录：$(pwd)"
@@ -154,6 +169,13 @@ jobs:
         # 如果已有.config，则应用配置
         if [ -e ./.config ]; then
           echo "✅ 验证openwrt目录下的.config配置，自动补全缺失项"
+          
+          # 尝试修复配置中的Rust相关问题
+          sed -i 's/CONFIG_RUST_DOWNLOAD_CI_LLVM=y/CONFIG_RUST_DOWNLOAD_CI_LLVM=if-unchanged/g' .config
+          
+          # 如果配置文件中启用了Rust包，尝试禁用以避免CI问题
+          sed -i 's/CONFIG_PACKAGE_rust=y/# CONFIG_PACKAGE_rust is not set/g' .config
+          
           make defconfig
           echo "✅ 配置验证完成"
         else
@@ -192,6 +214,10 @@ jobs:
       working-directory: ./openwrt
       run: |
         echo -e "$(($(nproc)+1)) thread compile"
+        
+        # 设置环境变量以修复Rust LLVM问题
+        export RUSTFLAGS="-C linker=/usr/bin/clang"
+        
         make -j$(($(nproc)+1)) V=s || make -j1 V=s
 
     - name: Organize files
