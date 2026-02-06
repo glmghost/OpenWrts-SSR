@@ -51,6 +51,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Clean workspace
+      run: |
+        # 清理可能存在的旧目录
+        rm -rf openwrt
+        echo "Cleaned workspace"
+
     - name: Free disk space
       uses: coder-xiaomo/free-disk-space@main
       with:
@@ -92,9 +98,9 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          openwrt/dl
-          openwrt/staging_dir/host
-          openwrt/staging_dir/toolchain-*
+          ./openwrt/dl
+          ./openwrt/staging_dir/host
+          ./openwrt/staging_dir/toolchain-*
           ~/.ccache
         key: ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-${{ github.sha }}
         restore-keys: |
@@ -102,6 +108,9 @@ jobs:
 
     - name: Clone OpenWrt official source code
       run: |
+        # 清理可能存在的旧目录
+        rm -rf openwrt
+        
         # Determine branch/tag based on version selection
         if [[ "${{ github.event.inputs.version }}" == "master" ]]; then
           REPO_BRANCH="master"
@@ -113,6 +122,7 @@ jobs:
           REPO_BRANCH="openwrt-25.12"
         fi
         
+        echo "Cloning OpenWrt branch: $REPO_BRANCH"
         git clone --depth 1 https://github.com/openwrt/openwrt.git -b "$REPO_BRANCH" openwrt
         cd openwrt
         
@@ -133,18 +143,16 @@ jobs:
     - name: Write Rust disable config (local.mk) - 核心禁用
       working-directory: ./openwrt
       run: |
-        cat > local.mk << EOF
-        # 彻底禁用所有Rust相关构建（Host端+目标端）
-        CONFIG_RUST=n
-        CONFIG_RUST_HOST_DEPENDENCIES=n
-        CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=n
-        CONFIG_RUST_DOWNLOAD_CI_LLVM=n
-        CONFIG_RUST_CARGO=n
-        CONFIG_RUST_RUSTC=n
-        CONFIG_RUST_RUSTFMT=n
-        # 禁用不必要的专利包，减少编译量
-        CONFIG_BUILD_PATENTED=n
-        EOF
+        echo "# 彻底禁用所有Rust相关构建（Host端+目标端）" > local.mk
+        echo "CONFIG_RUST=n" >> local.mk
+        echo "CONFIG_RUST_HOST_DEPENDENCIES=n" >> local.mk
+        echo "CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=n" >> local.mk
+        echo "CONFIG_RUST_DOWNLOAD_CI_LLVM=n" >> local.mk
+        echo "CONFIG_RUST_CARGO=n" >> local.mk
+        echo "CONFIG_RUST_RUSTC=n" >> local.mk
+        echo "CONFIG_RUST_RUSTFMT=n" >> local.mk
+        echo "# 禁用不必要的专利包，减少编译量" >> local.mk
+        echo "CONFIG_BUILD_PATENTED=n" >> local.mk
         # 清理可能残留的Rust配置文件
         rm -rf .config* package/feeds/packages/rust/.built package/feeds/packages/rust/Makefile.old
 
@@ -191,6 +199,14 @@ jobs:
         
         # 启用helloworld插件
         echo 'CONFIG_PACKAGE_luci-app-ssr-plus=y' >> .config
+        
+        # 确保Rust相关选项被禁用
+        echo 'CONFIG_RUST=n' >> .config
+        echo 'CONFIG_RUST_HOST_DEPENDENCIES=n' >> .config
+        echo '# CONFIG_RUST_CARGO is not set' >> .config
+        echo '# CONFIG_RUST_RUSTC is not set' >> .config
+        echo '# CONFIG_PACKAGE_rust is not set' >> .config
+        echo '# CONFIG_PACKAGE_rustc is not set' >> .config
         
         # 重新生成配置
         make defconfig
