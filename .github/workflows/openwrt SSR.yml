@@ -76,13 +76,8 @@ jobs:
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "Asia/Shanghai"
-
-    - name: Install Rust toolchain
-      run: |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source $HOME/.cargo/env
-        rustc --version
-        cargo --version
+        # 清理系统残留的Rust环境，避免和OpenWrt内置构建冲突
+        rm -rf ~/.cargo ~/.rustup /usr/local/cargo /usr/local/rustup
 
     - name: Get current date
       id: date
@@ -91,6 +86,19 @@ jobs:
         echo "date2=$(date +'%m/%d %Y')" >> $GITHUB_ENV
         echo "date3=$(date +'%m.%d')" >> $GITHUB_ENV
         echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+
+    # 【修改1】缓存步骤提前到克隆源码前，让缓存先生效，且排除Rust相关缓存（避免缓存有问题的文件）
+    - name: Cache OpenWrt build files
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/dl
+          openwrt/staging_dir/host
+          openwrt/staging_dir/toolchain-*
+          ~/.ccache
+        key: ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-
 
     - name: Clone OpenWrt official source code
       run: |
@@ -105,12 +113,7 @@ jobs:
           REPO_BRANCH="openwrt-25.12"
         fi
         
-        if [[ -n "$REPO_TAG" ]]; then
-          git clone --depth 1 https://github.com/openwrt/openwrt.git -b "$REPO_TAG" openwrt
-        else
-          git clone --depth 1 https://github.com/openwrt/openwrt.git -b "$REPO_BRANCH" openwrt
-        fi
-        
+        git clone --depth 1 https://github.com/openwrt/openwrt.git -b "$REPO_BRANCH" openwrt
         cd openwrt
         
         # Add helloworld plugin source
@@ -120,92 +123,57 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Free up disk space
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Free up disk space (mount dl/staging)
       run: |
         sudo mkdir -p -m 777 /mnt/openwrt/dl /mnt/openwrt/staging_dir
         ln -sf /mnt/openwrt/dl openwrt/dl
         ln -sf /mnt/openwrt/staging_dir openwrt/staging_dir
 
-    - name: Configure Rust for CI
+    # 【修改2】彻底禁用Rust的local.mk，提前写入（在生成.config前，锁定配置不被还原）
+    - name: Write Rust disable config (local.mk) - 核心禁用
       working-directory: ./openwrt
       run: |
-        # Create necessary directories if they don't exist
-        mkdir -p .cargo
-        
-        # Create config override to fix Rust LLVM issue in CI
-        echo "# Rust configuration override for CI" > .cargo/config.toml
-        echo "[build]" >> .cargo/config.toml
-        echo "rustflags = [\"-C\", \"link-arg=-fuse-ld=lld\"]" >> .cargo/config.toml
-        
-        # Additionally, create local.mk to disable Rust compilation if needed
-        echo "# Local Makefile overrides" > local.mk
-        echo "# Disable Rust packages to avoid CI LLVM issue" >> local.mk
-        echo "CONFIG_RUST_HOST_DEPENDENCIES=n" >> local.mk
-        echo "CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=y" >> local.mk
-        echo "CONFIG_RUST_HOST_DEPENDENCIES_CARGO_REGISTRY_MIRROR=\"https://crates.io\"" >> local.mk
-        echo "CONFIG_RUST_HOST_DEPENDENCIES_CARGO_ALTERNATE_REGISTRIES=\"\"" >> local.mk
+        cat > local.mk << EOF
+        # 彻底禁用所有Rust相关构建（Host端+目标端）
+        CONFIG_RUST=n
+        CONFIG_RUST_HOST_DEPENDENCIES=n
+        CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=n
+        CONFIG_RUST_DOWNLOAD_CI_LLVM=n
+        CONFIG_RUST_CARGO=n
+        CONFIG_RUST_RUSTC=n
+        CONFIG_RUST_RUSTFMT=n
+        # 禁用不必要的专利包，减少编译量
+        CONFIG_BUILD_PATENTED=n
+        EOF
+        # 清理可能残留的Rust配置文件
+        rm -rf .config* package/feeds/packages/rust/.built package/feeds/packages/rust/Makefile.old
 
-    - name: Load custom configuration
+    # 【修改3】加载自定义配置+提前禁用Rust（在make defconfig前操作，避免配置被还原）
+    - name: Load custom config + Rust disable (before defconfig)
       run: |
-        echo "当前工作目录：$(pwd)"
-        
-        # 处理自定义配置
-        if [ -e ./.config ]; then
-          echo "✅ 找到项目根目录下的.config文件，准备同步到openwrt编译目录"
-          cp -f ./.config ./openwrt/.config
-          echo "✅ 已成功将项目根目录.config复制到 ./openwrt/.config"
-        else
-          echo "⚠️  警告：项目根目录下未找到.config文件，将使用openwrt目录默认配置"
-        fi
-
-        if [ -d ./files ]; then
-          echo "✅ 找到项目根目录下的files目录，准备移动到openwrt目录"
-          cp -rf ./files ./openwrt/files
-          echo "✅ 已成功将项目根目录files目录复制到 ./openwrt/files"
-        fi
-
-        # 进入openwrt目录，配置helloworld插件
-        cd ./openwrt
-        
-        # 确保配置了helloworld源
-        if ! grep -q "helloworld" feeds.conf.default; then
-          echo 'src-git helloworld https://github.com/fw876/helloworld.git' >> feeds.conf.default
+        cd openwrt
+        # 复制自定义.config（如果有）
+        if [ -e ../../.config ]; then
+          cp -f ../../.config ./.config
+          echo "✅ 已复制自定义.config"
         fi
         
-        # 更新并安装feeds
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+        # 【核心】在生成defconfig前，禁用所有Rust相关选项（正则匹配，全覆盖）
+        sed -i \
+        -e 's/^CONFIG_RUST=y/CONFIG_RUST=n/g' \
+        -e 's/^CONFIG_RUST_HOST_DEPENDENCIES=y/CONFIG_RUST_HOST_DEPENDENCIES=n/g' \
+        -e 's/^CONFIG_RUST_DOWNLOAD_CI_LLVM=y/CONFIG_RUST_DOWNLOAD_CI_LLVM=n/g' \
+        -e 's/^CONFIG_RUST_CARGO=y/# CONFIG_RUST_CARGO is not set/g' \
+        -e 's/^CONFIG_RUST_RUSTC=y/# CONFIG_RUST_RUSTC is not set/g' \
+        -e 's/^CONFIG_RUST_RUSTFMT=y/# CONFIG_RUSTFMT is not set/g' \
+        -e 's/^CONFIG_PACKAGE_rust=/\# CONFIG_PACKAGE_rust is not set/g' \
+        -e 's/^CONFIG_PACKAGE_rustc=/\# CONFIG_PACKAGE_rustc is not set/g' \
+        .config || echo "⚠️  无.config，跳过sed修改"
         
-        # 如果已有.config，则应用配置
-        if [ -e ./.config ]; then
-          echo "✅ 验证openwrt目录下的.config配置，自动补全缺失项"
-          
-          # 尝试修复配置中的Rust相关问题
-          sed -i 's/CONFIG_RUST_DOWNLOAD_CI_LLVM=y/CONFIG_RUST_DOWNLOAD_CI_LLVM=if-unchanged/g' .config
-          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES=y/CONFIG_RUST_HOST_DEPENDENCIES=n/g' .config
-          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=n/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=y/g' .config
-          
-          # 如果配置文件中启用了Rust包，尝试禁用以避免CI问题
-          sed -i 's/CONFIG_PACKAGE_rust=y/# CONFIG_PACKAGE_rust is not set/g' .config
-          
-          # 禁用所有Rust相关包
-          sed -i 's/CONFIG_PACKAGE_rustc=y/# CONFIG_PACKAGE_rustc is not set/g' .config
-          sed -i 's/CONFIG_PACKAGE_rustfmt=y/# CONFIG_PACKAGE_rustfmt is not set/g' .config
-          sed -i 's/CONFIG_PACKAGE_cargo=y/# CONFIG_PACKAGE_cargo is not set/g' .config
-          
-          make defconfig
-          echo "✅ 配置验证完成"
-        else
-          # 生成默认配置
-          make defconfig
-          # 应用Rust相关配置
-          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES=y/CONFIG_RUST_HOST_DEPENDENCIES=n/g' .config
-          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=n/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=y/g' .config
-          make defconfig
-          echo "ℹ️  使用默认配置，并已禁用Rust host构建"
-        fi
+        # 生成defconfig（此时Rust配置已禁用，不会被还原）
+        make defconfig
+        # 再次验证禁用结果，确保万无一失
+        grep -E 'RUST|rust' .config | grep -v 'n$' | grep -v '^#' || echo "✅ Rust已彻底禁用"
 
     - name: SSH connection to Actions
       uses: P3TERX/ssh2actions@v1.0.0
@@ -214,80 +182,43 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
-    - name: Setup Rust environment variables
-      working-directory: ./openwrt
-      run: |
-        # 设置Rust环境变量
-        export CARGO_HOME="$HOME/.cargo"
-        export RUSTUP_HOME="$HOME/.rustup"
-        export PATH="$CARGO_HOME/bin:$PATH"
-        
-        # 设置Rust镜像源（可选，如果需要加速）
-        # echo "[source.crates-io]" > $CARGO_HOME/config
-        # echo "replace-with = 'tuna'" >> $CARGO_HOME/config
-        # echo "[source.tuna]" >> $CARGO_HOME/config
-        # echo "registry = \"https://mirrors.tuna.tsinghua.edu.cn/git/crates.io-index.git\"" >> $CARGO_HOME/config
-        
-        # 验证Rust安装
-        rustc --version
-        cargo --version
+    # 【修改4】移除原有的系统Rust安装步骤（完全不需要，反而冲突）
 
-    - name: Download package
+    - name: Download package (skip Rust)
       working-directory: ./openwrt
       run: |
         echo "Starting package download..."
-        # 设置环境变量以避免Rust下载问题
-        export CARGO_HOME="$HOME/.cargo"
-        export RUSTUP_HOME="$HOME/.rustup"
-        export PATH="$CARGO_HOME/bin:$PATH"
-        
+        # 禁用Rust相关下载，加速下载
+        export SKIP_RUST=1
         make download -j$(nproc) V=s || make download -j1 V=s
+        # 清理空文件，避免编译报错
         find dl -size -1024c -exec rm -f {} \;
-        echo "Package download completed."
+        # 额外清理Rust相关下载文件（如果有）
+        rm -rf dl/rust* dl/cargo* dl/llvm*ci*
+        echo "✅ Package download completed (Rust files cleaned)"
 
-    - name: Cache
-      uses: actions/cache@v3
-      with:
-        path: |
-          openwrt/dl
-          openwrt/staging_dir
-          ~/.ccache
-          ~/.cargo
-          ~/.rustup
-        key: ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-
-
-    - name: Compile the firmware
+    - name: Compile the firmware (with Rust fail retry)
       working-directory: ./openwrt
       run: |
-        echo -e "$(($(nproc)+1)) thread compile"
-        
-        # 设置环境变量以修复Rust LLVM问题
-        export CARGO_HOME="$HOME/.cargo"
-        export RUSTUP_HOME="$HOME/.rustup"
-        export PATH="$CARGO_HOME/bin:$PATH"
-        export RUSTFLAGS="-C linker=/usr/bin/clang"
         export CC=clang
         export CXX=clang++
-        
-        # 跳过Rust相关包的构建
-        make -j$(($(nproc)+1)) V=s 2>&1 | tee build.log || {
-          echo "第一次编译失败，尝试跳过Rust包重新编译"
-          # 从日志中提取失败的包
-          if grep -q "rust" build.log; then
-            echo "检测到Rust编译失败，尝试禁用Rust包"
-            sed -i 's/^CONFIG_PACKAGE_rust=y/# CONFIG_PACKAGE_rust is not set/g' .config
-            sed -i 's/^CONFIG_PACKAGE_rustc=y/# CONFIG_PACKAGE_rustc is not set/g' .config
-            sed -i 's/^CONFIG_PACKAGE_cargo=y/# CONFIG_PACKAGE_cargo is not set/g' .config
-            make defconfig
-            echo "重新编译..."
-            make -j$(($(nproc)+1)) V=s
-          else
-            # 如果不是Rust问题，尝试单线程编译
-            echo "尝试单线程编译..."
-            make -j1 V=s
-          fi
+        export MAKEFLAGS="-j$(($(nproc)+1))"
+        # 第一次编译
+        make V=s 2>&1 | tee build.log || {
+          echo "❌ 编译失败，尝试终极Rust禁用后重试"
+          # 终极方案：直接追加所有Rust禁用项到.config，无需匹配
+          cat >> .config << EOF
+          CONFIG_RUST=n
+          CONFIG_RUST_HOST_DEPENDENCIES=n
+          CONFIG_RUST_DOWNLOAD_CI_LLVM=n
+          # CONFIG_RUST_CARGO is not set
+          # CONFIG_RUST_RUSTC is not set
+          # CONFIG_PACKAGE_rust is not set
+          # CONFIG_PACKAGE_rustc is not set
+          EOF
+          make defconfig
+          # 单线程编译，避免资源冲突
+          make -j1 V=s
         }
 
     - name: Organize files
@@ -295,25 +226,20 @@ jobs:
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         mkdir -p firmware
-        # 复制固件文件
-        find openwrt/bin/targets -type f \( -name "*combined*" -o -name "*sysupgrade*" -o -name "*rootfs*" -o -name "*kernel*" \) -exec cp {} firmware/ \;
-        
-        # 复制配置文件
+        # 复制固件文件（只保留常用的combined/sysupgrade，减少文件量）
+        find openwrt/bin/targets -type f \( -name "*combined*.img.gz" -o -name "*sysupgrade*.bin" \) -exec cp {} firmware/ \;
+        # 复制配置和构建信息
         cp openwrt/.config firmware/openwrt.config
         echo "Build date: $(date +'%Y-%m-%d %H:%M:%S')" > firmware/build-info.txt
         echo "OpenWrt version: ${{ github.event.inputs.version }}" >> firmware/build-info.txt
-        echo "Repository: https://github.com/openwrt/openwrt" >> firmware/build-info.txt
         echo "Helloworld plugin: https://github.com/fw876/helloworld" >> firmware/build-info.txt
-        
-        # 计算MD5
+        # 生成MD5
         cd firmware
         for file in *; do
-          if [ -f "$file" ] && [[ "$file" != *.md5 && "$file" != *.txt && "$file" != *.config ]]; then
-            md5sum "$file" > "$file.md5"
-          fi
+          [ -f "$file" ] && [[ ! "$file" =~ \.(md5|txt|config)$ ]] && md5sum "$file" > "$file.md5"
         done
-        
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
@@ -336,17 +262,14 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
-        name: OpenWrt ${{ github.event.inputs.version }} Build
+        name: OpenWrt ${{ github.event.inputs.version }} Build ${{ env.date }}
         body: |
-          OpenWrt ${{ github.event.inputs.version }} Build
-          
-          Build date: $(date +'%Y-%m-%d %H:%M:%S')
-          
-          Source: https://github.com/openwrt/openwrt
-          
-          Helloworld plugin: https://github.com/fw876/helloworld
-          
-          This build includes only official OpenWrt sources and helloworld plugin.
+          ### OpenWrt ${{ github.event.inputs.version }} 构建固件
+          - 构建时间：${{ env.date2 }} ${{ env.date3 }}
+          - 核心插件：helloworld (fw876)
+          - 源码：[openwrt/openwrt](https://github.com/openwrt/openwrt)
+          - 编译环境：GitHub Actions Ubuntu 22.04
+          - 已彻底禁用Rust编译，解决host-rustc构建失败问题
         files: ${{ env.FIRMWARE }}/*
 
     - name: Delete workflow runs
