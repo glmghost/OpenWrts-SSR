@@ -71,10 +71,18 @@ jobs:
         gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
         python3-setuptools rsync swig unzip zlib1g-dev file wget scdoc \
         llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
-        libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+        libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev \
+        liblzma-dev libcurl4-openssl-dev libsqlite3-dev libxml2-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "Asia/Shanghai"
+
+    - name: Install Rust toolchain
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+        rustc --version
+        cargo --version
 
     - name: Get current date
       id: date
@@ -134,9 +142,10 @@ jobs:
         # Additionally, create local.mk to disable Rust compilation if needed
         echo "# Local Makefile overrides" > local.mk
         echo "# Disable Rust packages to avoid CI LLVM issue" >> local.mk
-        echo "# You can uncomment these lines if Rust is causing issues:" >> local.mk
-        echo "# CONFIG_PACKAGE_rust=y" >> local.mk
-        echo "# CONFIG_RUST_DOWNLOAD_CI_LLVM=if-unchanged" >> local.mk
+        echo "CONFIG_RUST_HOST_DEPENDENCIES=n" >> local.mk
+        echo "CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=y" >> local.mk
+        echo "CONFIG_RUST_HOST_DEPENDENCIES_CARGO_REGISTRY_MIRROR=\"https://crates.io\"" >> local.mk
+        echo "CONFIG_RUST_HOST_DEPENDENCIES_CARGO_ALTERNATE_REGISTRIES=\"\"" >> local.mk
 
     - name: Load custom configuration
       run: |
@@ -175,16 +184,27 @@ jobs:
           
           # 尝试修复配置中的Rust相关问题
           sed -i 's/CONFIG_RUST_DOWNLOAD_CI_LLVM=y/CONFIG_RUST_DOWNLOAD_CI_LLVM=if-unchanged/g' .config
+          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES=y/CONFIG_RUST_HOST_DEPENDENCIES=n/g' .config
+          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=n/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=y/g' .config
           
           # 如果配置文件中启用了Rust包，尝试禁用以避免CI问题
           sed -i 's/CONFIG_PACKAGE_rust=y/# CONFIG_PACKAGE_rust is not set/g' .config
+          
+          # 禁用所有Rust相关包
+          sed -i 's/CONFIG_PACKAGE_rustc=y/# CONFIG_PACKAGE_rustc is not set/g' .config
+          sed -i 's/CONFIG_PACKAGE_rustfmt=y/# CONFIG_PACKAGE_rustfmt is not set/g' .config
+          sed -i 's/CONFIG_PACKAGE_cargo=y/# CONFIG_PACKAGE_cargo is not set/g' .config
           
           make defconfig
           echo "✅ 配置验证完成"
         else
           # 生成默认配置
           make defconfig
-          echo "ℹ️  使用默认配置"
+          # 应用Rust相关配置
+          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES=y/CONFIG_RUST_HOST_DEPENDENCIES=n/g' .config
+          sed -i 's/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=n/CONFIG_RUST_HOST_DEPENDENCIES_USE_SYSTEM=y/g' .config
+          make defconfig
+          echo "ℹ️  使用默认配置，并已禁用Rust host构建"
         fi
 
     - name: SSH connection to Actions
@@ -194,10 +214,33 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
+    - name: Setup Rust environment variables
+      working-directory: ./openwrt
+      run: |
+        # 设置Rust环境变量
+        export CARGO_HOME="$HOME/.cargo"
+        export RUSTUP_HOME="$HOME/.rustup"
+        export PATH="$CARGO_HOME/bin:$PATH"
+        
+        # 设置Rust镜像源（可选，如果需要加速）
+        # echo "[source.crates-io]" > $CARGO_HOME/config
+        # echo "replace-with = 'tuna'" >> $CARGO_HOME/config
+        # echo "[source.tuna]" >> $CARGO_HOME/config
+        # echo "registry = \"https://mirrors.tuna.tsinghua.edu.cn/git/crates.io-index.git\"" >> $CARGO_HOME/config
+        
+        # 验证Rust安装
+        rustc --version
+        cargo --version
+
     - name: Download package
       working-directory: ./openwrt
       run: |
         echo "Starting package download..."
+        # 设置环境变量以避免Rust下载问题
+        export CARGO_HOME="$HOME/.cargo"
+        export RUSTUP_HOME="$HOME/.rustup"
+        export PATH="$CARGO_HOME/bin:$PATH"
+        
         make download -j$(nproc) V=s || make download -j1 V=s
         find dl -size -1024c -exec rm -f {} \;
         echo "Package download completed."
@@ -209,6 +252,8 @@ jobs:
           openwrt/dl
           openwrt/staging_dir
           ~/.ccache
+          ~/.cargo
+          ~/.rustup
         key: ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-${{ github.sha }}
         restore-keys: |
           ${{ runner.os }}-openwrt-${{ github.event.inputs.version }}-
@@ -219,9 +264,31 @@ jobs:
         echo -e "$(($(nproc)+1)) thread compile"
         
         # 设置环境变量以修复Rust LLVM问题
+        export CARGO_HOME="$HOME/.cargo"
+        export RUSTUP_HOME="$HOME/.rustup"
+        export PATH="$CARGO_HOME/bin:$PATH"
         export RUSTFLAGS="-C linker=/usr/bin/clang"
+        export CC=clang
+        export CXX=clang++
         
-        make -j$(($(nproc)+1)) V=s || make -j1 V=s
+        # 跳过Rust相关包的构建
+        make -j$(($(nproc)+1)) V=s 2>&1 | tee build.log || {
+          echo "第一次编译失败，尝试跳过Rust包重新编译"
+          # 从日志中提取失败的包
+          if grep -q "rust" build.log; then
+            echo "检测到Rust编译失败，尝试禁用Rust包"
+            sed -i 's/^CONFIG_PACKAGE_rust=y/# CONFIG_PACKAGE_rust is not set/g' .config
+            sed -i 's/^CONFIG_PACKAGE_rustc=y/# CONFIG_PACKAGE_rustc is not set/g' .config
+            sed -i 's/^CONFIG_PACKAGE_cargo=y/# CONFIG_PACKAGE_cargo is not set/g' .config
+            make defconfig
+            echo "重新编译..."
+            make -j$(($(nproc)+1)) V=s
+          else
+            # 如果不是Rust问题，尝试单线程编译
+            echo "尝试单线程编译..."
+            make -j1 V=s
+          fi
+        }
 
     - name: Organize files
       id: organize
