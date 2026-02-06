@@ -165,9 +165,9 @@ jobs:
         -e 's/^CONFIG_RUST_DOWNLOAD_CI_LLVM=y/CONFIG_RUST_DOWNLOAD_CI_LLVM=n/g' \
         -e 's/^CONFIG_RUST_CARGO=y/# CONFIG_RUST_CARGO is not set/g' \
         -e 's/^CONFIG_RUST_RUSTC=y/# CONFIG_RUST_RUSTC is not set/g' \
-        -e 's/^CONFIG_RUST_RUSTFMT=y/# CONFIG_RUSTFMT is not set/g' \
-        -e 's/^CONFIG_PACKAGE_rust=/\# CONFIG_PACKAGE_rust is not set/g' \
-        -e 's/^CONFIG_PACKAGE_rustc=/\# CONFIG_PACKAGE_rustc is not set/g' \
+        -e 's/^CONFIG_RUST_RUSTFMT=y/# CONFIG_RUST_RUSTFMT is not set/g' \
+        -e 's/^CONFIG_PACKAGE_rust=/# CONFIG_PACKAGE_rust is not set/g' \
+        -e 's/^CONFIG_PACKAGE_rustc=/# CONFIG_PACKAGE_rustc is not set/g' \
         .config || echo "⚠️  无.config，跳过sed修改"
         
         # 生成defconfig（此时Rust配置已禁用，不会被还原）
@@ -207,15 +207,13 @@ jobs:
         make V=s 2>&1 | tee build.log || {
           echo "❌ 编译失败，尝试终极Rust禁用后重试"
           # 终极方案：直接追加所有Rust禁用项到.config，无需匹配
-          cat >> .config << EOF
-          CONFIG_RUST=n
-          CONFIG_RUST_HOST_DEPENDENCIES=n
-          CONFIG_RUST_DOWNLOAD_CI_LLVM=n
-          # CONFIG_RUST_CARGO is not set
-          # CONFIG_RUST_RUSTC is not set
-          # CONFIG_PACKAGE_rust is not set
-          # CONFIG_PACKAGE_rustc is not set
-          EOF
+          echo "CONFIG_RUST=n" >> .config
+          echo "CONFIG_RUST_HOST_DEPENDENCIES=n" >> .config
+          echo "CONFIG_RUST_DOWNLOAD_CI_LLVM=n" >> .config
+          echo "# CONFIG_RUST_CARGO is not set" >> .config
+          echo "# CONFIG_RUST_RUSTC is not set" >> .config
+          echo "# CONFIG_PACKAGE_rust is not set" >> .config
+          echo "# CONFIG_PACKAGE_rustc is not set" >> .config
           make defconfig
           # 单线程编译，避免资源冲突
           make -j1 V=s
