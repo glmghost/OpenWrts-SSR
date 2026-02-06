@@ -148,32 +148,55 @@ jobs:
         # 清理可能残留的Rust配置文件
         rm -rf .config* package/feeds/packages/rust/.built package/feeds/packages/rust/Makefile.old
 
-    # 【修改3】加载自定义配置+提前禁用Rust（在make defconfig前操作，避免配置被还原）
-    - name: Load custom config + Rust disable (before defconfig)
+    # 【修改3】加载默认配置（x86_64），确保至少有一个基本配置可以编译
+    - name: Load default configuration
+      working-directory: ./openwrt
       run: |
-        cd openwrt
-        # 复制自定义.config（如果有）
-        if [ -e ../../.config ]; then
-          cp -f ../../.config ./.config
-          echo "✅ 已复制自定义.config"
+        # 使用默认的x86_64配置，这是最通用的配置
+        make defconfig
+        # 查看可用的target
+        echo "Available targets:"
+        ls target/linux/
+        # 设置默认目标为x86/64，这是通用PC架构
+        scripts/feeds update -a
+        scripts/feeds install -a
+        # 生成默认配置
+        make defconfig
+
+    # 【修改4】设置自定义配置，启用必要的包和目标
+    - name: Set custom configuration
+      working-directory: ./openwrt
+      run: |
+        # 检查是否有自定义配置文件，如果没有则使用默认配置
+        if [ -f ../.config ]; then
+            cp ../.config .config
+        else
+            # 创建一个基本配置，确保能生成固件
+            make x86/64_defconfig
         fi
         
-        # 【核心】在生成defconfig前，禁用所有Rust相关选项（正则匹配，全覆盖）
-        sed -i \
-        -e 's/^CONFIG_RUST=y/CONFIG_RUST=n/g' \
-        -e 's/^CONFIG_RUST_HOST_DEPENDENCIES=y/CONFIG_RUST_HOST_DEPENDENCIES=n/g' \
-        -e 's/^CONFIG_RUST_DOWNLOAD_CI_LLVM=y/CONFIG_RUST_DOWNLOAD_CI_LLVM=n/g' \
-        -e 's/^CONFIG_RUST_CARGO=y/# CONFIG_RUST_CARGO is not set/g' \
-        -e 's/^CONFIG_RUST_RUSTC=y/# CONFIG_RUST_RUSTC is not set/g' \
-        -e 's/^CONFIG_RUST_RUSTFMT=y/# CONFIG_RUST_RUSTFMT is not set/g' \
-        -e 's/^CONFIG_PACKAGE_rust=/# CONFIG_PACKAGE_rust is not set/g' \
-        -e 's/^CONFIG_PACKAGE_rustc=/# CONFIG_PACKAGE_rustc is not set/g' \
-        .config || echo "⚠️  无.config，跳过sed修改"
+        # 启用基本的镜像生成选项
+        sed -i 's/CONFIG_TARGET_ROOTFS_CPIOGZ=.*/# CONFIG_TARGET_ROOTFS_CPIOGZ is not set/g' .config
+        sed -i 's/CONFIG_TARGET_ROOTFS_TARGZ=.*/# CONFIG_TARGET_ROOTFS_TARGZ is not set/g' .config
+        sed -i '/CONFIG_TARGET_ROOTFS_EXT4FS/d' .config
+        echo 'CONFIG_TARGET_ROOTFS_SQUASHFS=y' >> .config
+        echo 'CONFIG_TARGET_IMAGES_GZIP=y' >> .config
         
-        # 生成defconfig（此时Rust配置已禁用，不会被还原）
+        # 确保启用了基本的网络工具
+        echo 'CONFIG_PACKAGE_curl=y' >> .config
+        echo 'CONFIG_PACKAGE_wget=y' >> .config
+        echo 'CONFIG_PACKAGE_luci=y' >> .config
+        echo 'CONFIG_PACKAGE_luci-theme-bootstrap=y' >> .config
+        echo 'CONFIG_PACKAGE_luci-app-opkg=y' >> .config
+        
+        # 启用helloworld插件
+        echo 'CONFIG_PACKAGE_luci-app-ssr-plus=y' >> .config
+        
+        # 重新生成配置
         make defconfig
-        # 再次验证禁用结果，确保万无一失
-        grep -E 'RUST|rust' .config | grep -v 'n$' | grep -v '^#' || echo "✅ Rust已彻底禁用"
+        
+        # 显示最终配置概要
+        grep "CONFIG_TARGET" .config | head -10
 
     - name: SSH connection to Actions
       uses: P3TERX/ssh2actions@v1.0.0
@@ -181,8 +204,6 @@ jobs:
       env:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-    # 【修改4】移除原有的系统Rust安装步骤（完全不需要，反而冲突）
 
     - name: Download package (skip Rust)
       working-directory: ./openwrt
@@ -197,40 +218,53 @@ jobs:
         rm -rf dl/rust* dl/cargo* dl/llvm*ci*
         echo "✅ Package download completed (Rust files cleaned)"
 
-    - name: Compile the firmware (with Rust fail retry)
+    - name: Compile the firmware
       working-directory: ./openwrt
       run: |
         export CC=clang
         export CXX=clang++
         export MAKEFLAGS="-j$(($(nproc)+1))"
-        # 第一次编译
-        make V=s 2>&1 | tee build.log || {
-          echo "❌ 编译失败，尝试终极Rust禁用后重试"
-          # 终极方案：直接追加所有Rust禁用项到.config，无需匹配
-          echo "CONFIG_RUST=n" >> .config
-          echo "CONFIG_RUST_HOST_DEPENDENCIES=n" >> .config
-          echo "CONFIG_RUST_DOWNLOAD_CI_LLVM=n" >> .config
-          echo "# CONFIG_RUST_CARGO is not set" >> .config
-          echo "# CONFIG_RUST_RUSTC is not set" >> .config
-          echo "# CONFIG_PACKAGE_rust is not set" >> .config
-          echo "# CONFIG_PACKAGE_rustc is not set" >> .config
-          make defconfig
-          # 单线程编译，避免资源冲突
-          make -j1 V=s
-        }
+        
+        # 显示当前配置信息
+        echo "Current configuration summary:"
+        grep "CONFIG_TARGET.*=y" .config | head -5
+        
+        # 开始编译
+        make V=s 2>&1 | tee build.log
+        
+        # 检查编译状态
+        if [ $? -ne 0 ]; then
+          echo "❌ 编译失败，查看错误日志"
+          tail -50 build.log
+          exit 1
+        else
+          echo "✅ 编译成功"
+        fi
+
+    - name: Check build results
+      working-directory: ./openwrt
+      run: |
+        echo "Checking build output directories..."
+        find bin/ -type f -name "*.img*" -o -name "*.bin" -o -name "*.gz" | head -20
+        echo "Total image files found:"
+        find bin/ -type f -name "*.img*" -o -name "*.bin" -o -name "*.gz" | wc -l
 
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         mkdir -p firmware
-        # 复制固件文件（只保留常用的combined/sysupgrade，减少文件量）
-        find openwrt/bin/targets -type f \( -name "*combined*.img.gz" -o -name "*sysupgrade*.bin" \) -exec cp {} firmware/ \;
+        # 复制固件文件（查找所有可能的固件文件类型）
+        find openwrt/bin/targets -type f \( -name "*combined*.img.gz" -o -name "*combined*.img" -o -name "*sysupgrade*.bin" -o -name "*factory*.bin" -o -name "*.img.gz" -o -name "*.bin" \) -exec cp {} firmware/ \; || echo "No firmware files found"
+        
         # 复制配置和构建信息
-        cp openwrt/.config firmware/openwrt.config
+        cp openwrt/.config firmware/openwrt.config 2>/dev/null || echo "No config file to copy"
         echo "Build date: $(date +'%Y-%m-%d %H:%M:%S')" > firmware/build-info.txt
         echo "OpenWrt version: ${{ github.event.inputs.version }}" >> firmware/build-info.txt
         echo "Helloworld plugin: https://github.com/fw876/helloworld" >> firmware/build-info.txt
+        echo "Build log:" >> firmware/build-info.txt
+        tail -50 openwrt/build.log >> firmware/build-info.txt 2>/dev/null || echo "No build log available"
+        
         # 生成MD5
         cd firmware
         for file in *; do
@@ -238,6 +272,10 @@ jobs:
         done
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
+        
+        # 列出找到的固件文件
+        echo "Files in firmware directory:"
+        ls -la firmware/
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
