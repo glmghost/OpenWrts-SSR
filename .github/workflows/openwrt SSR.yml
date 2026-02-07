@@ -261,17 +261,44 @@ jobs:
       working-directory: ./openwrt
       run: |
         echo "Checking build output directories..."
+        echo "Contents of bin/:"
         find bin/ -type f -name "*.img*" -o -name "*.bin" -o -name "*.gz" | head -20
         echo "Total image files found:"
         find bin/ -type f -name "*.img*" -o -name "*.bin" -o -name "*.gz" | wc -l
+        
+        echo "All files in bin/:"
+        find bin/ -type f | head -20
+        echo "All directories in bin/:"
+        find bin/ -type d | head -20
+        
+        # 检查是否真的生成了固件
+        if [ ! -d "bin/" ]; then
+          echo "❌ 错误：bin/ 目录不存在"
+          exit 1
+        fi
 
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         mkdir -p firmware
-        # 复制固件文件（查找所有可能的固件文件类型）
-        find openwrt/bin/targets -type f \( -name "*combined*.img.gz" -o -name "*combined*.img" -o -name "*sysupgrade*.bin" -o -name "*factory*.bin" -o -name "*.img.gz" -o -name "*.bin" \) -exec cp {} firmware/ \; || echo "No firmware files found"
+        echo "Created firmware directory"
+        
+        # 尝试多种方式查找固件文件
+        echo "Searching for firmware files..."
+        
+        # 方法1: 使用更广泛的模式
+        find openwrt/bin/targets -type f \( -name "*.img*" -o -name "*.bin" -o -name "*.gz" \) -exec cp {} firmware/ \; || echo "No firmware files found with targets method"
+        
+        # 方法2: 检查是否有其他目录结构
+        find openwrt/bin -type f \( -name "*.img*" -o -name "*.bin" -o -name "*.gz" \) -not -path "*/targets/*" -exec cp {} firmware/ \; || echo "No firmware files found with bin method"
+        
+        # 方法3: 如果没有找到，尝试复制整个bin目录（如果它包含我们需要的文件）
+        if [ -z "$(ls -A firmware)" ]; then
+          echo "No firmware files found, checking for any binaries..."
+          # 从bin目录下找所有可能的固件文件
+          find openwrt/bin -type f -name "*" -exec echo "Found: {}" \; | head -10
+        fi
         
         # 复制配置和构建信息
         cp openwrt/.config firmware/openwrt.config 2>/dev/null || echo "No config file to copy"
@@ -292,6 +319,12 @@ jobs:
         # 列出找到的固件文件
         echo "Files in firmware directory:"
         ls -la firmware/
+        
+        # 检查是否确实找到了文件
+        if [ -z "$(ls -A firmware)" ]; then
+          echo "❌ Warning: No files were copied to firmware directory!"
+          exit 1
+        fi
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
