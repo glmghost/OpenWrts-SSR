@@ -93,7 +93,7 @@ jobs:
         echo "date3=$(date +'%m.%d')" >> $GITHUB_ENV
         echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
 
-    # 【修改1】缓存步骤提前到克隆源码前，让缓存先生效，且排除Rust相关缓存（避免缓存有问题的文件）
+    # 【修复】缓存步骤提前到克隆源码前，让缓存先生效，且排除Rust相关缓存（避免缓存有问题的文件）
     - name: Cache OpenWrt build files
       uses: actions/cache@v3
       with:
@@ -139,7 +139,7 @@ jobs:
         ln -sf /mnt/openwrt/dl openwrt/dl
         ln -sf /mnt/openwrt/staging_dir openwrt/staging_dir
 
-    # 【修改2】彻底禁用Rust及相关包，提前写入（在生成.config前，锁定配置不被还原）
+    # 【修复】彻底禁用Rust及相关包，提前写入（在生成.config前，锁定配置不被还原）
     - name: Write Rust disable config (local.mk) - 核心禁用
       working-directory: ./openwrt
       run: |
@@ -154,14 +154,14 @@ jobs:
         echo "# 禁用不必要的专利包，减少编译量" >> local.mk
         echo "CONFIG_BUILD_PATENTED=n" >> local.mk
         echo "# 禁用可能导致构建失败的包" >> local.mk
-        echo "CONFIG_PACKAGE_rust=y" >> local.mk
-        echo "CONFIG_PACKAGE_rustc=y" >> local.mk
-        echo "CONFIG_PACKAGE_cargo=y" >> local.mk
+        echo "CONFIG_PACKAGE_rust=n" >> local.mk
+        echo "CONFIG_PACKAGE_rustc=n" >> local.mk
+        echo "CONFIG_PACKAGE_cargo=n" >> local.mk
         # 清理可能残留的Rust配置文件
         rm -rf .config* package/feeds/packages/rust/.built package/feeds/packages/rust/Makefile.old
 
-    # 【修改3】加载默认配置（x86_64），确保至少有一个基本配置可以编译
-    - name: Load default configuration
+    # 【修复】根据OpenWrt版本查找正确的配置文件路径
+    - name: Find and use correct x86 configuration
       working-directory: ./openwrt
       run: |
         # 检查可用的目标架构
@@ -172,11 +172,36 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         
-        # 生成x86_64默认配置
-        make defconfig
-        make x86/64_defconfig
+        # 根据OpenWrt版本确定正确的配置路径
+        if [[ "${{ github.event.inputs.version }}" == "23.05" || "${{ github.event.inputs.version }}" == "24.10" || "${{ github.event.inputs.version }}" == "25.12" || "${{ github.event.inputs.version }}" == "master" ]]; then
+          # 对于较新版本，先尝试标准配置
+          if [ -f "target/linux/x86/64/config-default" ]; then
+            echo "Using target/linux/x86/64/config-default"
+            cp target/linux/x86/64/config-default .config
+          elif [ -f "target/linux/x86/config-default" ]; then
+            echo "Using target/linux/x86/config-default"
+            cp target/linux/x86/config-default .config
+          else
+            # 如果找不到特定配置，则使用defconfig生成基础配置
+            echo "Generating basic config with defconfig"
+            make defconfig
+          fi
+        else
+          # 对于较老版本，使用旧路径
+          make defconfig
+        fi
+        
+        # 添加基本配置
+        echo 'CONFIG_TARGET_x86=y' >> .config
+        echo 'CONFIG_TARGET_x86_64=y' >> .config
+        echo 'CONFIG_TARGET_ROOTFS_INITRAMFS=y' >> .config
+        echo 'CONFIG_TARGET_ROOTFS_SQUASHFS=y' >> .config
+        echo 'CONFIG_GRUB_IMAGES=y' >> .config
+        
+        # 保存配置
+        scripts/kconfig/conf --defconfig=.config Kconfig
 
-    # 【修改4】设置自定义配置，启用必要的包和目标，彻底禁用Rust相关包
+    # 【修复】设置自定义配置，启用必要的包和目标，彻底禁用Rust相关包
     - name: Set custom configuration
       working-directory: ./openwrt
       run: |
@@ -184,8 +209,11 @@ jobs:
         if [ -f ../.config ]; then
             cp ../.config .config
         else
-            # 创建一个基本配置，确保能生成固件
-            make x86/64_defconfig
+            # 确保已存在基础配置
+            if [ ! -f .config ]; then
+                echo "No config found, creating basic one"
+                make defconfig
+            fi
         fi
         
         # 确保启用了基本的镜像生成选项
